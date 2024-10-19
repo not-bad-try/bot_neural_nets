@@ -1,12 +1,13 @@
 import logging
 from telegram import Update, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, PreCheckoutQueryHandler, filters
 import openai
 import requests
 from io import BytesIO
-import config  # импортируем файл конфигурации с токенами
+import config
+from subscription import has_active_subscription, subscription_status, subscribe, successful_payment  # Функции для работы с подписками
 
-# Логирование для отладки
+# Логирование
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,9 @@ async def start(update: Update, context):
     user_network_choice[user_id] = 'text'  # По умолчанию нейросеть для текста
     await update.message.reply_text(
         "Привет! Я бот с GPT-4 и DALL·E. Используй команду /set_network чтобы выбрать нейросеть.\n"
-        "По умолчанию используется текстовая модель (GPT-4)."
+        "По умолчанию используется текстовая модель (GPT-4).\n"
+        "Чтобы узнать статус подписки, используй команду /subscription_status.\n"
+        "Чтобы оформить подписку, используй команду /subscribe <plan>, где <plan> может быть 'day', 'week', 'month', 'year', 'forever'."
     )
 
 # Обработчик команды для выбора нейросети
@@ -67,8 +70,13 @@ async def set_network(update: Update, context):
 
 # Обработчик текстовых сообщений
 async def handle_message(update: Update, context):
-    user_input = update.message.text
     user_id = update.message.from_user.id
+    # Проверка подписки
+    if not has_active_subscription(user_id):
+        await update.message.reply_text("У вас нет активной подписки. Пожалуйста, оформите подписку.")
+        return
+    
+    user_input = update.message.text
     network_choice = user_network_choice.get(user_id, 'text')
 
     if network_choice == 'text':
@@ -84,19 +92,28 @@ async def handle_message(update: Update, context):
         else:
             await update.message.reply_text("Извините, не удалось сгенерировать изображение.")
 
+# Обработчик предоплаты
+async def precheckout_callback(update: Update, context):
+    query = update.pre_checkout_query
+    if query.invoice_payload.startswith('subscription-'):
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="Произошла ошибка с заказом. Попробуйте снова.")
+
 # Основная функция для запуска бота
 async def main():
-    # Используй токен, полученный от BotFather
     token = config.TELEGRAM_BOT_API_TOKEN
 
     app = ApplicationBuilder().token(token).build()
-
-    # Регистрация команд и обработчиков
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set_network", set_network))
+    app.add_handler(CommandHandler("subscription_status", subscription_status))  # Статус подписки
+    app.add_handler(CommandHandler("subscribe", subscribe))  # Оформление подписки
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))  # Обработчик предоплаты
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))  # Обработчик успешной оплаты
 
-    # Запуск бота
+
     await app.start()
     await app.idle()
 
